@@ -21,10 +21,15 @@
 #include "Interfaces/IPluginManager.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
+#include "KantanDocGenModule.h"
+#include "Interfaces/IProjectManager.h"
+#include "ProjectDescriptor.h"
 
 
 #define LOCTEXT_NAMESPACE "KantanDocGen"
 
+#define PLAY_FAIL_SOUND() GEditor->PlayEditorSound(TEXT("/Engine/EditorSounds/Notifications/CompileFailed_Cue.CompileFailed_Cue"))
+#define PLAY_SUCC_SOUND() GEditor->PlayEditorSound(TEXT("/Engine/EditorSounds/Notifications/CompileSuccess_Cue.CompileSuccess_Cue"));
 
 FDocGenTaskProcessor::FDocGenTaskProcessor()
 {
@@ -32,25 +37,100 @@ FDocGenTaskProcessor::FDocGenTaskProcessor()
 	bTerminationRequest = false;
 }
 
-void FDocGenTaskProcessor::QueueTask(FKantanDocGenSettings const& Settings)
+void FDocGenTaskProcessor::QueueTask(FKantanDocGenSettings const& Settings, EKantanDocGenerationMode InMode)
 {
 	TSharedPtr< FDocGenTask > NewTask = MakeShared< FDocGenTask >();
 	NewTask->Settings = Settings;
+	Mode = InMode;
 
-	FNotificationInfo Info(LOCTEXT("DocGenWaiting", "Doc gen waiting"));
-	Info.Image = nullptr;//FEditorStyle::GetBrush(TEXT("LevelEditor.RecompileGameCode"));
-	Info.FadeInDuration = 0.2f;
-	Info.ExpireDuration = 5.0f;
-	Info.FadeOutDuration = 1.0f;
-	Info.bUseThrobber = true;
-	Info.bUseSuccessFailIcons = true;
-	Info.bUseLargeFont = true;
-	Info.bFireAndForget = false;
-	Info.bAllowThrottleWhenFrameRateIsLow = false;
-	NewTask->Notification = FSlateNotificationManager::Get().AddNotification(Info);
-	NewTask->Notification->SetCompletionState(SNotificationItem::CS_Pending);
+	NewTask->ModulePluginNameAndDesc = GenerateModulePluginNameAndDesc(Settings);
+
+
+	if (Mode == EKantanDocGenerationMode::UI)
+	{
+		FNotificationInfo Info(LOCTEXT("DocGenWaiting", "Doc gen waiting"));
+		Info.Image = nullptr;//FEditorStyle::GetBrush(TEXT("LevelEditor.RecompileGameCode"));
+		Info.FadeInDuration = 0.2f;
+		Info.ExpireDuration = 5.0f;
+		Info.FadeOutDuration = 1.0f;
+		Info.bUseThrobber = true;
+		Info.bUseSuccessFailIcons = true;
+		Info.bUseLargeFont = true;
+		Info.bFireAndForget = false;
+		Info.bAllowThrottleWhenFrameRateIsLow = false;
+		NewTask->Notification = FSlateNotificationManager::Get().AddNotification(Info);
+		NewTask->Notification->SetCompletionState(SNotificationItem::CS_Pending);
+	}
 
 	Waiting.Enqueue(NewTask);
+}
+
+TMap<FName, TPair<FString, FString>> FDocGenTaskProcessor::GenerateModulePluginNameAndDesc(FKantanDocGenSettings const& Settings)
+{
+	TMap<FName, TPair<FString, FString>> Out;
+
+	for (const FName& EngineModule : Settings.BaseEngineModulesToInclude)
+	{
+		Out.Add(EngineModule, { TEXT("Engine"), TEXT("Core Unreal Engine.") });
+	}
+
+	const FProjectDescriptor* ProjectDescriptor = IProjectManager::Get().GetCurrentProject();
+
+	if (Settings.IncludeBaseProject)
+	{
+		for (const FModuleDescriptor& ProjectModule : ProjectDescriptor->Modules)
+		{
+			Out.Add(ProjectModule.Name, { FApp::GetProjectName(), ProjectDescriptor->Description });
+		}
+	}
+
+	for (const FPluginReferenceDescriptor& PluginDesc : ProjectDescriptor->Plugins)
+	{
+		if (!PluginDesc.bEnabled)
+		{
+			continue;
+		}
+
+		TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPluginFromDescriptor(PluginDesc);
+		if (!Plugin)
+		{
+			continue;
+		}
+
+		const FPluginDescriptor& PluginDescription = Plugin->GetDescriptor();
+		switch (Plugin->GetType())
+		{
+		case EPluginType::Engine:
+			if (!Settings.IncludeEnginePlugins)
+			{
+				continue;
+			}
+			else
+			{
+				UE_LOG(LogKantanDocGen, Log, TEXT("Documenting Engine plugin [%s]"), *PluginDescription.FriendlyName);
+			}
+			break;
+		case EPluginType::Project:
+			if (!Settings.IncludeProjectPlugins)
+			{
+				continue;
+			}
+			else
+			{
+				UE_LOG(LogKantanDocGen, Log, TEXT("Documenting Project plugin [%s]"), *PluginDescription.FriendlyName);
+			}
+			break;
+		default:
+			continue;
+		}
+
+		for (const FModuleDescriptor& PluginModule : PluginDescription.Modules)
+		{
+			Out.Add(PluginModule.Name, { PluginDescription.FriendlyName, PluginDescription.Description });
+		}
+	}
+
+	return Out;
 }
 
 bool FDocGenTaskProcessor::IsRunning() const
@@ -67,7 +147,7 @@ bool FDocGenTaskProcessor::Init()
 uint32 FDocGenTaskProcessor::Run()
 {
 	TSharedPtr< FDocGenTask > Next;
-	while(!bTerminationRequest && Waiting.Dequeue(Next))
+	while (!bTerminationRequest && Waiting.Dequeue(Next))
 	{
 		ProcessTask(Next);
 	}
@@ -88,172 +168,183 @@ void FDocGenTaskProcessor::Stop()
 void FDocGenTaskProcessor::ProcessTask(TSharedPtr< FDocGenTask > InTask)
 {
 	/********** Lambdas for the game thread to execute **********/
-	
-	auto GameThread_InitDocGen = [this](FString const& DocTitle, FString const& IntermediateDir) -> bool
-	{
-		Current->Task->Notification->SetExpireDuration(2.0f);
-		Current->Task->Notification->SetText(LOCTEXT("DocGenInProgress", "Doc gen in progress"));
 
-		return Current->DocGen->GT_Init(DocTitle, IntermediateDir, Current->Task->Settings.BlueprintContextClass);
-	};
+	auto GameThread_InitDocGen = [this](FString const& DocTitle, FString const& IntermediateDir) -> bool
+		{
+			if (Mode == EKantanDocGenerationMode::UI)
+			{
+				Current->Task->Notification->SetExpireDuration(2.0f);
+				Current->Task->Notification->SetText(LOCTEXT("DocGenInProgress", "Doc gen in progress"));
+			}
+
+			return Current->DocGen->GT_Init(DocTitle, IntermediateDir, Current->Task->ModulePluginNameAndDesc,
+				Current->Task->Settings.BlueprintContextClass);
+		};
 
 	TFunction<void()> GameThread_EnqueueEnumerators = [this]()
-	{
-		// @TODO: Specific class enumerator
-		Current->Enumerators.Enqueue(MakeShared< FCompositeEnumerator< FNativeModuleEnumerator > >(Current->Task->Settings.NativeModules));
-
-		TArray< FName > ContentPackagePaths;
-		for (auto const& Path : Current->Task->Settings.ContentPaths)
 		{
-			ContentPackagePaths.AddUnique(FName(*Path.Path));
-		}
-		Current->Enumerators.Enqueue(MakeShared< FCompositeEnumerator< FContentPathEnumerator > >(ContentPackagePaths));
-	};
+			TArray<FName> AllModules;
+			Current->Task->ModulePluginNameAndDesc.GenerateKeyArray(AllModules);
+			Current->Enumerators.Enqueue(MakeShared< FCompositeEnumerator< FNativeModuleEnumerator > >(AllModules));
+
+			TArray< FName > ContentPackagePaths;
+			for (auto const& Path : Current->Task->Settings.ContentPaths)
+			{
+				ContentPackagePaths.AddUnique(FName(*Path.Path));
+			}
+			Current->Enumerators.Enqueue(MakeShared< FCompositeEnumerator< FContentPathEnumerator > >(ContentPackagePaths));
+		};
 
 	auto GameThread_EnumerateNextObject = [this]() -> bool
-	{
-		Current->SourceObject.Reset();
-		Current->CurrentSpawners.Empty();
-
-		while(auto Obj = Current->CurrentEnumerator->GetNext())
 		{
-			// Ignore if already processed
-			if(Current->Processed.Contains(Obj))
-			{
-				continue;
-			}
+			Current->SourceObject.Reset();
+			Current->CurrentSpawners.Empty();
 
-			// Cache list of spawners for this object
-			auto& BPActionMap = FBlueprintActionDatabase::Get().GetAllActions();
-			if(auto ActionList = BPActionMap.Find(Obj))
+			while (auto Obj = Current->CurrentEnumerator->GetNext())
 			{
-				if(ActionList->Num() == 0)
+				// Ignore if already processed
+				if (Current->Processed.Contains(Obj))
 				{
 					continue;
 				}
 
-				Current->SourceObject = Obj;
-				for(auto Spawner : *ActionList)
+				// Cache list of spawners for this object
+				auto& BPActionMap = FBlueprintActionDatabase::Get().GetAllActions();
+				if (auto ActionList = BPActionMap.Find(Obj))
 				{
-					// Add to queue as weak ptr
-					check(Current->CurrentSpawners.Enqueue(Spawner));
+					if (ActionList->Num() == 0)
+					{
+						continue;
+					}
+
+					Current->SourceObject = Obj;
+					for (auto Spawner : *ActionList)
+					{
+						// Add to queue as weak ptr
+						check(Current->CurrentSpawners.Enqueue(Spawner));
+					}
+
+					// Done
+					Current->Processed.Add(Obj);
+					return true;
 				}
-
-				// Done
-				Current->Processed.Add(Obj);
-				return true;
 			}
-		}
 
-		// This enumerator is finished
-		return false;
-	};
+			// This enumerator is finished
+			return false;
+		};
 
 	auto GameThread_EnumerateNextNode = [this](FNodeDocsGenerator::FNodeProcessingState& OutState) -> UK2Node*
-	{
-		// We've just come in from another thread, check the source object is still around
-		if(!Current->SourceObject.IsValid())
 		{
-			UE_LOG(LogKantanDocGen, Warning, TEXT("Object being enumerated expired!"));
-			return nullptr;
-		}
-
-		// Try to grab the next spawner in the cached list
-		TWeakObjectPtr< UBlueprintNodeSpawner > Spawner;
-		while(Current->CurrentSpawners.Dequeue(Spawner))
-		{
-			if(Spawner.IsValid())
+			// We've just come in from another thread, check the source object is still around
+			if (!Current->SourceObject.IsValid())
 			{
-				// See if we can document this spawner
-				auto K2_NodeInst = Current->DocGen->GT_InitializeForSpawner(Spawner.Get(), Current->SourceObject.Get(), OutState);
-
-				if(K2_NodeInst == nullptr)
-				{
-					continue;
-				}
-
-				// Make sure this node object will never be GCd until we're done with it.
-				K2_NodeInst->AddToRoot();
-				return K2_NodeInst;
+				UE_LOG(LogKantanDocGen, Warning, TEXT("Object being enumerated expired!"));
+				return nullptr;
 			}
-		}
 
-		// No spawners left in the queue
-		return nullptr;
-	};
+			// Try to grab the next spawner in the cached list
+			TWeakObjectPtr< UBlueprintNodeSpawner > Spawner;
+			while (Current->CurrentSpawners.Dequeue(Spawner))
+			{
+				if (Spawner.IsValid())
+				{
+					// See if we can document this spawner
+					auto K2_NodeInst = Current->DocGen->GT_InitializeForSpawner(Spawner.Get(), Current->SourceObject.Get(), OutState);
+
+					if (K2_NodeInst == nullptr)
+					{
+						continue;
+					}
+
+					// Make sure this node object will never be GCd until we're done with it.
+					K2_NodeInst->AddToRoot();
+					return K2_NodeInst;
+				}
+			}
+
+			// No spawners left in the queue
+			return nullptr;
+		};
 
 	auto GameThread_FinalizeDocs = [this](FString const& OutputPath) -> bool
-	{
-		bool const Result = Current->DocGen->GT_Finalize(OutputPath);
-
-		if (!Result)
 		{
-			Current->Task->Notification->SetText(LOCTEXT("DocFinalizationFailed", "Doc gen failed"));
-			Current->Task->Notification->SetCompletionState(SNotificationItem::CS_Fail);
-			Current->Task->Notification->ExpireAndFadeout();
-			//GEditor->PlayEditorSound(CompileSuccessSound);
-		}
+			bool const Result = Current->DocGen->GT_Finalize(OutputPath);
 
-		return Result;
-	};
+			if (!Result)
+			{
+				if (Mode == EKantanDocGenerationMode::UI)
+				{
+					Current->Task->Notification->SetText(LOCTEXT("DocFinalizationFailed", "Doc gen failed"));
+					Current->Task->Notification->SetCompletionState(SNotificationItem::CS_Fail);
+					Current->Task->Notification->ExpireAndFadeout();
+					PLAY_FAIL_SOUND();
+				}
+			}
+
+			return Result;
+		};
 
 	/*****************************/
 
-
-	Current = MakeUnique< FDocGenCurrentTask >();
-	Current->Task = InTask;
+	DocGenThreads::RunOnGameThread([this, InTask]()
+		{
+			// Destructor of slate component require in either slate thread or game thread, see SWidget::Invalidate(...)
+			Current = MakeUnique< FDocGenCurrentTask >();
+			Current->Task = InTask;
+		});
 
 	FString IntermediateDir = FPaths::ProjectIntermediateDir() / TEXT("KantanDocGen") / Current->Task->Settings.DocumentationTitle;
 
-	DocGenThreads::RunOnGameThread(GameThread_EnqueueEnumerators);	
+	DocGenThreads::RunOnGameThread(GameThread_EnqueueEnumerators);
 
 	// Initialize the doc generator
 	Current->DocGen = MakeUnique< FNodeDocsGenerator >();
 
-	if(!DocGenThreads::RunOnGameThreadRetVal(GameThread_InitDocGen, Current->Task->Settings.DocumentationTitle, IntermediateDir))
+	if (!DocGenThreads::RunOnGameThreadRetVal(GameThread_InitDocGen, Current->Task->Settings.DocumentationTitle, IntermediateDir))
 	{
 		UE_LOG(LogKantanDocGen, Error, TEXT("Failed to initialize doc generator!"));
 		return;
 	}
 
 	bool const bCleanIntermediate = true;
-	if(bCleanIntermediate)
+	if (bCleanIntermediate)
 	{
 		IFileManager::Get().DeleteDirectory(*IntermediateDir, false, true);
 	}
 
-	for(auto const& Name : Current->Task->Settings.ExcludedClasses)
+	for (auto const& Name : Current->Task->Settings.ExcludedClasses)
 	{
 		Current->Excluded.Add(Name);
 	}
 
 	int SuccessfulNodeCount = 0;
-	while(Current->Enumerators.Dequeue(Current->CurrentEnumerator))
+	while (Current->Enumerators.Dequeue(Current->CurrentEnumerator))
 	{
-		while(DocGenThreads::RunOnGameThreadRetVal(GameThread_EnumerateNextObject))	// Game thread: Enumerate next Obj, get spawner list for Obj, store as array of weak ptrs.
+		while (DocGenThreads::RunOnGameThreadRetVal(GameThread_EnumerateNextObject))	// Game thread: Enumerate next Obj, get spawner list for Obj, store as array of weak ptrs.
 		{
-			if(bTerminationRequest)
+			if (bTerminationRequest)
 			{
 				return;
 			}
 
 			FNodeDocsGenerator::FNodeProcessingState NodeState;
-			while(auto NodeInst = DocGenThreads::RunOnGameThreadRetVal(GameThread_EnumerateNextNode, NodeState))	// Game thread: Get next still valid spawner, spawn node, add to root, return it)
+			while (auto NodeInst = DocGenThreads::RunOnGameThreadRetVal(GameThread_EnumerateNextNode, NodeState))	// Game thread: Get next still valid spawner, spawn node, add to root, return it)
 			{
 				// NodeInst should hopefully not reference anything except stuff we control (ie graph object), and it's rooted so should be safe to deal with here
 
 				// Generate image
-				if(!Current->DocGen->GenerateNodeImage(NodeInst, NodeState))
+				if (!Current->DocGen->GenerateNodeImage(NodeInst, NodeState))
 				{
 					UE_LOG(LogKantanDocGen, Warning, TEXT("Failed to generate node image!"))
-					continue;
+						continue;
 				}
 
 				// Generate doc
-				if(!Current->DocGen->GenerateNodeDocs(NodeInst, NodeState))
+				if (!Current->DocGen->GenerateNodeDocs(NodeInst, NodeState))
 				{
 					UE_LOG(LogKantanDocGen, Warning, TEXT("Failed to generate node doc xml!"))
-					continue;
+						continue;
 				}
 
 				++SuccessfulNodeCount;
@@ -261,31 +352,37 @@ void FDocGenTaskProcessor::ProcessTask(TSharedPtr< FDocGenTask > InTask)
 		}
 	}
 
-	if(SuccessfulNodeCount == 0)
+	if (SuccessfulNodeCount == 0)
 	{
 		UE_LOG(LogKantanDocGen, Error, TEXT("No nodes were found to document!"));
 
-		DocGenThreads::RunOnGameThread([this]
-			{
-				Current->Task->Notification->SetText(LOCTEXT("DocFinalizationFailed", "Doc gen failed - No nodes found"));
-				Current->Task->Notification->SetCompletionState(SNotificationItem::CS_Fail);
-				Current->Task->Notification->ExpireAndFadeout();
-			});
-		//GEditor->PlayEditorSound(CompileSuccessSound);
+		if (Mode == EKantanDocGenerationMode::UI)
+		{
+			DocGenThreads::RunOnGameThread([this]
+				{
+					Current->Task->Notification->SetText(LOCTEXT("DocFinalizationFailed", "Doc gen failed - No nodes found"));
+					Current->Task->Notification->SetCompletionState(SNotificationItem::CS_Fail);
+					Current->Task->Notification->ExpireAndFadeout();
+					PLAY_FAIL_SOUND();
+				});
+		}
 		return;
 	}
 
 	// Game thread: DocGen.GT_Finalize()
-	if(!DocGenThreads::RunOnGameThreadRetVal(GameThread_FinalizeDocs, IntermediateDir))
+	if (!DocGenThreads::RunOnGameThreadRetVal(GameThread_FinalizeDocs, IntermediateDir))
 	{
 		UE_LOG(LogKantanDocGen, Error, TEXT("Failed to finalize xml docs!"));
 		return;
 	}
 
-	DocGenThreads::RunOnGameThread([this]
-		{
-			Current->Task->Notification->SetText(LOCTEXT("DocConversionInProgress", "Converting docs"));
-		});
+	if (Mode == EKantanDocGenerationMode::UI)
+	{
+		DocGenThreads::RunOnGameThread([this]
+			{
+				Current->Task->Notification->SetText(LOCTEXT("DocConversionInProgress", "Converting docs"));
+			});
+	}
 
 	auto TransformationResult = ProcessIntermediateDocs(
 		IntermediateDir,
@@ -293,52 +390,57 @@ void FDocGenTaskProcessor::ProcessTask(TSharedPtr< FDocGenTask > InTask)
 		Current->Task->Settings.DocumentationTitle,
 		Current->Task->Settings.bCleanOutputDirectory
 	);
-	if(TransformationResult != EIntermediateProcessingResult::Success)
+	if (TransformationResult != EIntermediateProcessingResult::Success)
 	{
 		UE_LOG(LogKantanDocGen, Error, TEXT("Failed to transform xml to html!"));
 
 		auto Msg = FText::Format(LOCTEXT("DocConversionFailed", "Doc gen failed - {0}"),
 			TransformationResult == EIntermediateProcessingResult::DiskWriteFailure ? LOCTEXT("CouldNotWriteToOutput", "Could not write output, please clear output directory or enable 'Clean Output Directory' option") : LOCTEXT("GenericTransformationFailure", "Conversion failure")
-			);
-		DocGenThreads::RunOnGameThread([this, Msg]
-			{
-				Current->Task->Notification->SetText(Msg);
-				Current->Task->Notification->SetCompletionState(SNotificationItem::CS_Fail);
-				Current->Task->Notification->ExpireAndFadeout();
-			});
-		//GEditor->PlayEditorSound(CompileSuccessSound);
+		);
+
+		if (Mode == EKantanDocGenerationMode::UI)
+		{
+			DocGenThreads::RunOnGameThread([this, Msg]
+				{
+					Current->Task->Notification->SetText(Msg);
+					Current->Task->Notification->SetCompletionState(SNotificationItem::CS_Fail);
+					Current->Task->Notification->ExpireAndFadeout();
+					PLAY_FAIL_SOUND();
+				});
+		}
 		return;
 	}
 
-	DocGenThreads::RunOnGameThread([this]
-		{
-			FString HyperlinkTarget = TEXT("file://") / FPaths::ConvertRelativePathToFull(Current->Task->Settings.OutputDirectory.Path / Current->Task->Settings.DocumentationTitle / TEXT("index.html"));
-			auto OnHyperlinkClicked = [HyperlinkTarget]
+	if (Mode == EKantanDocGenerationMode::UI)
+	{
+		DocGenThreads::RunOnGameThread([this]
 			{
-				UE_LOG(LogKantanDocGen, Log, TEXT("Invoking hyperlink"));
-				FPlatformProcess::LaunchURL(*HyperlinkTarget, nullptr, nullptr);
-			};
+				auto OnHyperlinkClicked = [Settings = Current->Task->Settings]
+					{
+						FKantanDocGenModule::OpenURL(Settings);
+					};
 
-			auto const HyperlinkText = TAttribute< FText >::Create(TAttribute< FText >::FGetter::CreateLambda([] { return LOCTEXT("GeneratedDocsHyperlink", "View docs"); }));
-			// @TODO: Bug in SNotificationItemImpl::SetHyperlink, ignores non-delegate attributes... LOCTEXT("GeneratedDocsHyperlink", "View docs");
-		
-			Current->Task->Notification->SetText(LOCTEXT("DocConversionSuccessful", "Doc gen completed"));
-			Current->Task->Notification->SetCompletionState(SNotificationItem::CS_Success);
-			Current->Task->Notification->SetHyperlink(
-				FSimpleDelegate::CreateLambda(OnHyperlinkClicked),
-				HyperlinkText
-			);
-			Current->Task->Notification->ExpireAndFadeout();
-		});
+				auto const HyperlinkText = TAttribute< FText >::Create(TAttribute< FText >::FGetter::CreateLambda([] { return LOCTEXT("GeneratedDocsHyperlink", "View docs"); }));
+				// @TODO: Bug in SNotificationItemImpl::SetHyperlink, ignores non-delegate attributes... LOCTEXT("GeneratedDocsHyperlink", "View docs");
 
-	Current.Reset();
+				Current->Task->Notification->SetText(LOCTEXT("DocConversionSuccessful", "Doc gen completed"));
+				Current->Task->Notification->SetCompletionState(SNotificationItem::CS_Success);
+				Current->Task->Notification->SetHyperlink(
+					FSimpleDelegate::CreateLambda(OnHyperlinkClicked),
+					HyperlinkText
+				);
+				Current->Task->Notification->ExpireAndFadeout();
+				Current.Reset();
+				PLAY_SUCC_SOUND();
+			});
+	}
 }
 
 FDocGenTaskProcessor::EIntermediateProcessingResult FDocGenTaskProcessor::ProcessIntermediateDocs(FString const& IntermediateDir, FString const& OutputDir, FString const& DocTitle, bool bCleanOutput)
 {
 	auto& PluginManager = IPluginManager::Get();
 	auto Plugin = PluginManager.FindPlugin(TEXT("KantanDocGen"));
-	if(!Plugin.IsValid())
+	if (!Plugin.IsValid())
 	{
 		UE_LOG(LogKantanDocGen, Error, TEXT("Failed to locate plugin info"));
 		return EIntermediateProcessingResult::UnknownError;
@@ -373,10 +475,10 @@ FDocGenTaskProcessor::EIntermediateProcessingResult FDocGenTaskProcessor::Proces
 	);
 
 	int32 ReturnCode = 0;
-	if(Proc.IsValid())
+	if (Proc.IsValid())
 	{
 		FString BufferedText;
-		for(bool bProcessFinished = false; !bProcessFinished; )
+		for (bool bProcessFinished = false; !bProcessFinished; )
 		{
 			bProcessFinished = FPlatformProcess::GetProcReturnCode(Proc, &ReturnCode);
 
@@ -389,7 +491,7 @@ FDocGenTaskProcessor::EIntermediateProcessingResult FDocGenTaskProcessor::Proces
 			BufferedText += FPlatformProcess::ReadPipe(PipeRead);
 
 			int32 EndOfLineIdx;
-			while(BufferedText.FindChar('\n', EndOfLineIdx))
+			while (BufferedText.FindChar('\n', EndOfLineIdx))
 			{
 				FString Line = BufferedText.Left(EndOfLineIdx);
 				Line.RemoveFromEnd(TEXT("\r"));
@@ -407,7 +509,7 @@ FDocGenTaskProcessor::EIntermediateProcessingResult FDocGenTaskProcessor::Proces
 		FPlatformProcess::CloseProc(Proc);
 		Proc.Reset();
 
-		if(ReturnCode != 0)
+		if (ReturnCode != 0)
 		{
 			UE_LOG(LogKantanDocGen, Error, TEXT("KantanDocGen tool failed (code %i), see above output."), ReturnCode);
 		}
@@ -417,18 +519,20 @@ FDocGenTaskProcessor::EIntermediateProcessingResult FDocGenTaskProcessor::Proces
 	FPlatformProcess::ClosePipe(0, PipeRead);
 	FPlatformProcess::ClosePipe(0, PipeWrite);
 
-	switch(ReturnCode)
+	switch (ReturnCode)
 	{
-		case 0:
+	case 0:
 		return EIntermediateProcessingResult::Success;
-		case -1:
+	case -1:
 		return EIntermediateProcessingResult::UnknownError;
-		case -2:
+	case -2:
 		return EIntermediateProcessingResult::DiskWriteFailure;
-		default:
+	default:
 		return EIntermediateProcessingResult::SuccessWithErrors;
 	}
 }
 
+#undef PLAY_FAIL_SOUND
+#undef PLAY_SUCC_SOUND
 
 #undef LOCTEXT_NAMESPACE

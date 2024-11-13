@@ -20,14 +20,19 @@ class FNodeDocsGenerator;
 
 class UBlueprintNodeSpawner;
 
+enum class EKantanDocGenerationMode : uint8
+{
+	UI,
+	ExecCommand
+};
 
-class FDocGenTaskProcessor: public FRunnable
+class FDocGenTaskProcessor : public FRunnable
 {
 public:
 	FDocGenTaskProcessor();
 
 public:
-	void QueueTask(FKantanDocGenSettings const& Settings);
+	void QueueTask(FKantanDocGenSettings const& Settings, EKantanDocGenerationMode InMode);
 	bool IsRunning() const;
 
 public:
@@ -41,6 +46,7 @@ protected:
 	{
 		FKantanDocGenSettings Settings;
 		TSharedPtr< class SNotificationItem > Notification;
+		TMap<FName, TPair<FString, FString>> ModulePluginNameAndDesc;
 	};
 
 	struct FDocGenCurrentTask
@@ -64,9 +70,10 @@ protected:
 	};
 
 protected:
+	TMap<FName, TPair<FString, FString>> GenerateModulePluginNameAndDesc(FKantanDocGenSettings const& Settings);
 	void ProcessTask(TSharedPtr< FDocGenTask > InTask);
 
-	enum EIntermediateProcessingResult: uint8 {
+	enum EIntermediateProcessingResult : uint8 {
 		Success,
 		SuccessWithErrors,
 		UnknownError,
@@ -76,6 +83,8 @@ protected:
 	EIntermediateProcessingResult ProcessIntermediateDocs(FString const& IntermediateDir, FString const& OutputDir, FString const& DocTitle, bool bCleanOutput);
 
 protected:
+	EKantanDocGenerationMode Mode = EKantanDocGenerationMode::UI;
+
 	TQueue< TSharedPtr< FDocGenTask > > Waiting;
 	TUniquePtr< FDocGenCurrentTask > Current;
 	TQueue< TSharedPtr< FDocGenOutputTask > > Converting;

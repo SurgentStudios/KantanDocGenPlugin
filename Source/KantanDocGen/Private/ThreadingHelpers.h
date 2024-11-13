@@ -15,8 +15,15 @@ namespace DocGenThreads
 	template < typename TLambda >
 	inline auto RunOnGameThread(TLambda Func) -> void
 	{
-		FGraphEventRef Task = FFunctionGraphTask::CreateAndDispatchWhenReady(MoveTemp(Func), TStatId(), nullptr, ENamedThreads::GameThread);
-		FTaskGraphInterface::Get().WaitUntilTaskCompletes(Task);
+		if (IsInGameThread())
+		{
+			Func();
+		}
+		else
+		{
+			FGraphEventRef Task = FFunctionGraphTask::CreateAndDispatchWhenReady(MoveTemp(Func), TStatId(), nullptr, ENamedThreads::GameThread);
+			FTaskGraphInterface::Get().WaitUntilTaskCompletes(Task);
+		}
 	}
 
 	template < typename TLambda, typename... TArgs >
@@ -24,16 +31,22 @@ namespace DocGenThreads
 	{
 		typedef decltype(Func(Args...)) TResult;
 
-		TResult Result;
-		TFunction<void()> NullaryFunc = [&]
+		if (IsInGameThread())
 		{
-			Result = Func(Args...);
-		};
+			return Func(Args...);
+		}
+		else
+		{
+			TResult Result;
+			TFunction<void()> NullaryFunc = [&]
+				{
+					Result = Func(Args...);
+				};
 
-		FGraphEventRef Task = FFunctionGraphTask::CreateAndDispatchWhenReady(NullaryFunc, TStatId(), nullptr, ENamedThreads::GameThread);
-		FTaskGraphInterface::Get().WaitUntilTaskCompletes(Task);
-
-		return Result;
+			FGraphEventRef Task = FFunctionGraphTask::CreateAndDispatchWhenReady(NullaryFunc, TStatId(), nullptr, ENamedThreads::GameThread);
+			FTaskGraphInterface::Get().WaitUntilTaskCompletes(Task);
+			return Result;
+		}
 	}
 
 }

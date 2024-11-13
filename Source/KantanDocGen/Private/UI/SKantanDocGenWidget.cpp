@@ -36,47 +36,47 @@ void SKantanDocGenWidget::Construct(const SKantanDocGenWidget::FArguments& InArg
 		[
 			SNew(SVerticalBox)
 
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			[
-				DetailView
-			]
-
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			[
-				SNew(SHorizontalBox)
-
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
+				+ SVerticalBox::Slot()
+				.AutoHeight()
 				[
-					SNew(SButton)
-					.Text(LOCTEXT("GenButtonLabel", "Generate Docs"))
-					.IsEnabled(this, &SKantanDocGenWidget::ValidateSettingsForGeneration)
-					.OnClicked(this, &SKantanDocGenWidget::OnGenerateDocs)
+					DetailView
 				]
-			]
+
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(SHorizontalBox)
+
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						[
+							SNew(SButton)
+								.Text(LOCTEXT("GenButtonLabel", "Generate Docs"))
+								.IsEnabled(this, &SKantanDocGenWidget::ValidateSettingsForGeneration)
+								.OnClicked(this, &SKantanDocGenWidget::OnGenerateDocs)
+						]
+				]
 		];
 
-	auto Settings = UKantanDocGenSettingsObject::Get();
+	auto Settings = UKantanDocGenSettingsBase::Get<UKantanDocGenSettingsObject>();
 	DetailView->SetObject(Settings);
 }
 
 bool SKantanDocGenWidget::ValidateSettingsForGeneration() const
 {
-	auto const& Settings = UKantanDocGenSettingsObject::Get()->Settings;
+	auto const& Settings = UKantanDocGenSettingsBase::Get<UKantanDocGenSettingsObject>()->Settings;
 
-	if(Settings.DocumentationTitle.IsEmpty())
+	if (Settings.DocumentationTitle.IsEmpty())
 	{
 		return false;
 	}
 
-	if(!Settings.HasAnySources())
+	if (!Settings.HasAnySources())
 	{
 		return false;
 	}
 
-	if(Settings.BlueprintContextClass == nullptr)
+	if (Settings.BlueprintContextClass == nullptr)
 	{
 		return false;
 	}
@@ -87,7 +87,7 @@ bool SKantanDocGenWidget::ValidateSettingsForGeneration() const
 FReply SKantanDocGenWidget::OnGenerateDocs()
 {
 	auto& Module = FModuleManager::LoadModuleChecked< FKantanDocGenModule >(TEXT("KantanDocGen"));
-	Module.GenerateDocs(UKantanDocGenSettingsObject::Get()->Settings);
+	Module.GenerateDocs(UKantanDocGenSettingsBase::Get<UKantanDocGenSettingsObject>()->Settings, EKantanDocGenerationMode::UI);
 
 	TSharedRef< SWindow > ParentWindow = FSlateApplication::Get().FindWidgetWindow(AsShared()).ToSharedRef();
 	FSlateApplication::Get().RequestDestroyWindow(ParentWindow);

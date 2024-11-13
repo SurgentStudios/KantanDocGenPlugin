@@ -6,6 +6,9 @@
 
 #include "KantanDocGenCommands.h"
 
+#include "Modules/ModuleManager.h"
+#include "DocGenSettings.h"
+#include "KantanDocGenModule.h"
 
 #define LOCTEXT_NAMESPACE "KantanDocGen"
 
@@ -16,6 +19,40 @@ void FKantanDocGenCommands::RegisterCommands()
 	NameToCommandMap.Add(TEXT("ShowDocGenUI"), ShowDocGenUI);
 }
 
+static bool KantanDocGenExec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
+{
+	if (!FParse::Param(Cmd, TEXT("KantanDocGen")))
+	{
+		return false;
+	}
+
+	FKantanDocGenSettings Settings = UKantanDocGenSettingsBase::Get<UKantanDocGenExecCmdSettings>()->Settings;
+	FString NewOutput;
+	if (FParse::Value(Cmd, TEXT("-Output="), NewOutput))
+	{
+		Settings.OutputDirectory = FDirectoryPath(NewOutput);
+	}
+
+
+	if (FParse::Param(Cmd, TEXT("Generate")))
+	{
+		FKantanDocGenModule& Module = FModuleManager::LoadModuleChecked< FKantanDocGenModule >(TEXT("KantanDocGen"));
+		Module.GenerateDocs(Settings, EKantanDocGenerationMode::ExecCommand);
+	}
+
+	if (FParse::Param(Cmd, TEXT("Open")))
+	{
+		FKantanDocGenModule::OpenURL(Settings);
+	}
+
+	if (FParse::Param(Cmd, TEXT("Quit")))
+	{
+		FPlatformMisc::RequestExitWithStatus(true, GIsCriticalError ? -1 : 0);
+	}
+	return true;
+}
+
+FStaticSelfRegisteringExec KantanDocGenExecRegistration(KantanDocGenExec);
 
 #undef LOCTEXT_NAMESPACE
 

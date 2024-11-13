@@ -1,4 +1,4 @@
-// This Source Code Form is subject to the terms of the Mozilla Public
+﻿// This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
@@ -34,7 +34,7 @@ public:
 		FString RelImageBasePath;
 		FString ImageFilename;
 
-		FNodeProcessingState():
+		FNodeProcessingState() :
 			ClassDocXml()
 			, ClassDocsPath()
 			, RelImageBasePath()
@@ -44,7 +44,9 @@ public:
 
 public:
 	/** Callable only from game thread */
-	bool GT_Init(FString const& InDocsTitle, FString const& InOutputDir, UClass* BlueprintContextClass = AActor::StaticClass());
+	bool GT_Init(FString const& InDocsTitle, FString const& InOutputDir,
+		const TMap<FName, TPair<FString, FString>>& InModulePluginNameAndDesc,
+		UClass* BlueprintContextClass = AActor::StaticClass());
 	UK2Node* GT_InitializeForSpawner(UBlueprintNodeSpawner* Spawner, UObject* SourceObject, FNodeProcessingState& OutState);
 	bool GT_Finalize(FString OutputPath);
 	/**/
@@ -57,9 +59,11 @@ public:
 protected:
 	void CleanUp();
 	TSharedPtr< FXmlFile > InitIndexXml(FString const& IndexTitle);
-	TSharedPtr< FXmlFile > InitClassDocXml(UClass* Class);
-	bool UpdateIndexDocWithClass(FXmlFile* DocFile, UClass* Class);
-	bool UpdateClassDocWithNode(FXmlFile* DocFile, UEdGraphNode* Node);
+	TSharedPtr< FXmlFile > InitClassDocXml(UClass* Class, const FString& ModuleName);
+	void FinalizeClassDocXml(UClass* Class, TSharedPtr<FXmlFile> Doc);
+	bool UpdateIndexDocWithClass(FXmlFile* DocFile, UClass* Class, const FString& ModuleName,
+		const FString& PluginName, const FString& PluginDescription);
+	bool UpdateClassDocWithNode(FXmlFile* DocFile, UEdGraphNode* Node, const FString& NodeDesc);
 	bool SaveIndexXml(FString const& OutDir);
 	bool SaveClassDocXml(FString const& OutDir);
 
@@ -77,6 +81,7 @@ protected:
 	FString DocsTitle;
 	TSharedPtr< FXmlFile > IndexXml;
 	TMap< TWeakObjectPtr< UClass >, TSharedPtr< FXmlFile > > ClassDocsMap;
+	TMap<FName, TPair<FString, FString>> ModulePluginNameAndDesc;
 
 	FString OutputDir;
 
